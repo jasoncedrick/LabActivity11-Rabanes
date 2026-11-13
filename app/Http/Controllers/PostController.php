@@ -2,19 +2,20 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StorePostRequest;
 use App\Models\Post;
+use App\Models\Tag;
 use Illuminate\Http\Request;
 
 class PostController extends Controller
 {
+    private array $categories = ['Announcement', 'Health', 'Peace & Order', 'Ayuda', 'Education'];
+
     public function index(Request $request)
     {
-        $request->validate([
-            'q' => ['nullable', 'string', 'max:255'],
-            'category' => ['nullable', 'string', 'max:100'],
-        ]);
-
-        $query = Post::where('is_published', true);
+        $query = Post::with(['author', 'tags'])
+            ->withCount('comments')
+            ->where('is_published', true);
 
         if ($request->filled('q')) {
             $query->where('title', 'like', '%'.$request->input('q').'%');
@@ -24,15 +25,22 @@ class PostController extends Controller
             $query->where('category', $request->input('category'));
         }
 
+        if ($request->filled('tag')) {
+            $query->whereHas('tags', function ($q) use ($request) {
+                $q->where('name', $request->input('tag'));
+            });
+        }
+
         $posts = $query->orderByDesc('is_pinned')
             ->latest('published_at')
             ->orderByDesc('id')
             ->paginate(7)
             ->withQueryString();
 
-        $categories = Post::query()->distinct()->orderBy('category')->pluck('category');
+        $categories = $this->categories;
+        $tags = Tag::orderBy('name')->get();
 
-        return view('posts.index', compact('posts', 'categories'));
+        return view('posts.index', compact('posts', 'categories', 'tags'));
     }
 
     public function show($id)
@@ -46,6 +54,39 @@ class PostController extends Controller
         $post->views += 1;
         $post->save();
 
+        $post->load([
+            'author',
+            'tags',
+            'comments' => fn ($q) => $q->latest()->orderByDesc('id'),
+            'comments.user',
+        ]);
+
         return view('posts.show', compact('post'));
+    }
+
+    public function create()
+    {
+        abort_if(auth()->user()->author === null, 403);
+
+        $categories = $this->categories;
+        $tags = Tag::orderBy('name')->get();
+
+        return view('posts.create', compact('categories', 'tags'));
+    }
+
+    public function store(StorePostRequest $request)
+    {
+        $data = $request->safe()->except('tags');
+        $data['is_published'] = $request->boolean('is_published');
+        $data['published_at'] = $data['is_published'] ? now() : null;
+
+        $post = $request->user()->author->posts()->create($data);
+        $post->tags()->sync($request->validated('tags'));
+
+        if (! $post->is_published) {
+            return redirect()->route('posts.index')->with('status', 'Draft saved.');
+        }
+
+        return redirect()->route('posts.show', $post->id)->with('status', 'Post published.');
     }
 }
